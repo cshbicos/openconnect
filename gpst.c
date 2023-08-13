@@ -32,6 +32,8 @@
 #include <sys/types.h>
 #ifdef _WIN32
 #include "win32-ipicmp.h"
+#include <windows.h>
+#include <tchar.h>
 #else
 #include <sys/wait.h>
 /* The BSDs require the first two headers before netinet/ip.h
@@ -902,6 +904,39 @@ out:
 	return result;
 }
 
+#if defined(_WIN32)
+static void WindowsReadFromPipe(struct oc_text_buf *report_buf, HANDLE g_hChildStd_OUT_Rd) 
+
+// Read output from the child process's pipe for STDOUT
+// and write to the parent process's pipe for STDOUT. 
+// Stop when there is no more data. 
+{ 
+   DWORD dwRead; 
+   CHAR chBuf[4096]; 
+   BOOL bSuccess = FALSE;
+
+   BOOL firstLine = FALSE;
+   unsigned long len;
+
+   for (;;) 
+   { 
+      bSuccess = ReadFile( g_hChildStd_OUT_Rd, chBuf, 4096, &dwRead, NULL);
+      if( ! bSuccess || dwRead == 0 ) break; 
+
+      if (firstLine == FALSE) {
+          firstLine = TRUE;
+          len = atoi(chBuf);
+          continue;
+      }
+      len = len - dwRead;
+
+	  buf_append_bytes(report_buf, chBuf, dwRead);
+
+      if (! bSuccess || len == 0 ) break;
+   } 
+} 
+#endif
+
 static int run_hip_script(struct openconnect_info *vpninfo)
 {
 #if !defined(_WIN32) && !defined(__native_client__)
@@ -917,11 +952,7 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 				     _("WARNING: Server asked us to submit HIP report with md5sum %s.\n"
 				       "    VPN connectivity may be disabled or limited without HIP report submission.\n    %s\n"),
 				     vpninfo->csd_token,
-#if defined(_WIN32) || defined(__native_client__)
-				     _("However, running the HIP report submission script on this platform is not yet implemented.")
-#else
 				     _("You need to provide a --csd-wrapper argument with the HIP report submission script.")
-#endif
 				);
 			/* XXX: Many GlobalProtect VPNs work fine despite allegedly requiring HIP report submission */
 		}
@@ -929,9 +960,99 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 	}
 
 #if defined(_WIN32) || defined(__native_client__)
-	vpn_progress(vpninfo, PRG_ERR,
-		     _("Error: Running the 'HIP Report' script on this platform is not yet implemented.\n"));
-	return -EPERM;
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Trying to run HIP Trojan script '%s'.\n"),
+		     vpninfo->csd_wrapper);
+	char hip_argv[4096];
+	
+	strcat(hip_argv, openconnect_utf8_to_legacy(vpninfo, vpninfo->csd_wrapper));
+	strcat(hip_argv, " --cookie ");
+	strcat(hip_argv, vpninfo->cookie);
+	if (vpninfo->ip_info.addr) {
+		strcat(hip_argv, " --client-ip ");
+		strcat(hip_argv, vpninfo->ip_info.addr);
+	}
+	if (vpninfo->ip_info.addr6) {
+		strcat(hip_argv, " --client-ipv6 ");
+		strcat(hip_argv, vpninfo->ip_info.addr6);
+	}
+	strcat(hip_argv, " --md5 ");
+	strcat(hip_argv, vpninfo->csd_token);
+	strcat(hip_argv, " --client-os ");
+	strcat(hip_argv, gpst_os_name(vpninfo));
+	strcat(hip_argv, " --pan-gp-hip-exe ");
+	strcat(hip_argv, vpninfo->onevpn_hip_exec);
+
+	
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Calling HIP Script with '%s'.\n"), hip_argv);
+
+	HANDLE g_hChildStd_OUT_Rd = NULL;
+	HANDLE g_hChildStd_OUT_Wr = NULL;
+   	SECURITY_ATTRIBUTES saAttr;
+
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+    // Create a pipe for the child process's STDOUT. 
+    if (!CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0)) {
+        vpn_progress(vpninfo, PRG_ERR,_("Failed StdoutRd CreatePipe\n"));
+        return 1;
+    }
+
+    // Ensure the read handle to the pipe for STDOUT is not inherited.
+    if (!SetHandleInformation(g_hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0)) {
+        vpn_progress(vpninfo, PRG_ERR,_("Failed Stdout SetHandleInformation\n"));
+        return 1;
+    }
+
+	STARTUPINFO si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(STARTUPINFO);
+    si.hStdError = g_hChildStd_OUT_Wr;
+    si.hStdOutput = g_hChildStd_OUT_Wr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    ZeroMemory(&pi, sizeof(pi));
+	// Start the child process. 
+    if (!CreateProcess(vpninfo->csd_wrapper,   // Module name
+        hip_argv,        	// Command line args
+        NULL,           // Process handle not inheritable
+        NULL,           // Thread handle not inheritable
+        TRUE,          // Set handle inheritance to FALSE
+        0,              // No creation flags
+        NULL,           // Use parent's environment block
+        NULL,           // Use parent's starting directory 
+        &si,            // Pointer to STARTUPINFO structure
+        &pi)           // Pointer to PROCESS_INFORMATION structure
+        )
+    {	
+		vpn_progress(vpninfo, PRG_ERR, _("CreateProcess failed \n"));
+        return 1;
+    }
+	
+	struct oc_text_buf *report_buf = buf_alloc();
+	WindowsReadFromPipe(report_buf, g_hChildStd_OUT_Rd);
+	
+	WaitForSingleObject(pi.hProcess,INFINITE);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(g_hChildStd_OUT_Wr);
+
+	vpn_progress(vpninfo, PRG_INFO,
+				_("HIP script '%s' completed successfully (report is %d bytes).\n"),
+					vpninfo->csd_wrapper, report_buf->pos);
+
+	int ret = check_or_submit_hip_report(vpninfo, report_buf->data);
+	if (ret < 0){
+		vpn_progress(vpninfo, PRG_ERR, _("HIP report submission failed.\n"));
+	}else {
+		vpn_progress(vpninfo, PRG_INFO, _("HIP report submitted successfully.\n"));
+		ret = 0;
+	}
+	return ret;
 #else
 
 	vpn_progress(vpninfo, PRG_INFO,

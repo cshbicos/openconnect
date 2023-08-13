@@ -522,6 +522,7 @@ struct openconnect_info {
 	char *dtls_ciphers;
 	char *dtls12_ciphers;
 	char *csd_wrapper;
+	char *onevpn_hip_exec;
 	int trojan_interval;
 	time_t last_trojan;
 	int no_http_keepalive;

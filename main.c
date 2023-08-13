@@ -175,6 +175,7 @@ enum {
 	OPT_COOKIE_ON_STDIN,
 	OPT_CSD_USER,
 	OPT_CSD_WRAPPER,
+	OPT_ONEVPN_HIP_EXEC,
 	OPT_CIPHERSUITES,
 	OPT_DISABLE_IPV6,
 	OPT_DTLS_CIPHERS,
@@ -241,11 +242,12 @@ static const struct option long_options[] = {
 	OPTION("script-tun", 0, 'S'),
 	OPTION("syslog", 0, 'l'),
 	OPTION("csd-user", 1, OPT_CSD_USER),
-	OPTION("csd-wrapper", 1, OPT_CSD_WRAPPER),
 #endif
 #ifdef HAVE_POSIX_SPAWN
 	OPTION("external-browser", 1, OPT_EXT_BROWSER),
 #endif
+	OPTION("csd-wrapper", 1, OPT_CSD_WRAPPER),
+	OPTION("hip-exec", 1, OPT_ONEVPN_HIP_EXEC),
 	OPTION("no-external-auth", 0, OPT_NO_EXTERNAL_AUTH),
 	OPTION("pfs", 0, OPT_PFS),
 	OPTION("allow-insecure-crypto", 0, OPT_ALLOW_INSECURE_CRYPTO),
@@ -1408,6 +1410,7 @@ static int autocomplete(int argc, char **argv)
 
 			case 's': /* --script */
 			case OPT_CSD_WRAPPER: /* --csd-wrapper */
+			case OPT_ONEVPN_HIP_EXEC:
 			case OPT_EXT_BROWSER: /* --external-browser */
 				autocomplete_special("EXECUTABLE", comp_opt, prefixlen, NULL);
 				break;
@@ -1823,6 +1826,9 @@ int main(int argc, char **argv)
 			vpninfo->csd_wrapper = keep_config_arg();
 			break;
 #endif /* !_WIN32 */
+		case OPT_ONEVPN_HIP_EXEC:
+			vpninfo->onevpn_hip_exec = keep_config_arg();
+			break;
 		case 'F':
 			add_form_field(keep_config_arg());
 			break;
