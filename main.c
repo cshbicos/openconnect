@@ -1822,10 +1822,10 @@ int main(int argc, char **argv)
 			get_uids(config_arg, &vpninfo->uid_csd, &vpninfo->gid_csd);
 			vpninfo->uid_csd_given = 1;
 			break;
+#endif /* !_WIN32 */
 		case OPT_CSD_WRAPPER:
 			vpninfo->csd_wrapper = keep_config_arg();
 			break;
-#endif /* !_WIN32 */
 		case OPT_ONEVPN_HIP_EXEC:
 			vpninfo->onevpn_hip_exec = keep_config_arg();
 			break;

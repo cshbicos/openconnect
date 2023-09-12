@@ -906,33 +906,17 @@ out:
 
 #if defined(_WIN32)
 static void WindowsReadFromPipe(struct oc_text_buf *report_buf, HANDLE g_hChildStd_OUT_Rd) 
-
-// Read output from the child process's pipe for STDOUT
-// and write to the parent process's pipe for STDOUT. 
-// Stop when there is no more data. 
 { 
    DWORD dwRead; 
    CHAR chBuf[4096]; 
    BOOL bSuccess = FALSE;
-
-   BOOL firstLine = FALSE;
-   unsigned long len;
 
    for (;;) 
    { 
       bSuccess = ReadFile( g_hChildStd_OUT_Rd, chBuf, 4096, &dwRead, NULL);
       if( ! bSuccess || dwRead == 0 ) break; 
 
-      if (firstLine == FALSE) {
-          firstLine = TRUE;
-          len = atoi(chBuf);
-          continue;
-      }
-      len = len - dwRead;
-
 	  buf_append_bytes(report_buf, chBuf, dwRead);
-
-      if (! bSuccess || len == 0 ) break;
    } 
 } 
 #endif
@@ -964,10 +948,12 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		     _("Trying to run HIP Trojan script '%s'.\n"),
 		     vpninfo->csd_wrapper);
 	char hip_argv[4096];
-	
+
+	strcpy(hip_argv, "\"");
 	strcat(hip_argv, openconnect_utf8_to_legacy(vpninfo, vpninfo->csd_wrapper));
-	strcat(hip_argv, " --cookie ");
+	strcat(hip_argv, "\" --cookie \"");
 	strcat(hip_argv, vpninfo->cookie);
+	strcat(hip_argv, "\"");
 	if (vpninfo->ip_info.addr) {
 		strcat(hip_argv, " --client-ip ");
 		strcat(hip_argv, vpninfo->ip_info.addr);
@@ -980,13 +966,16 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 	strcat(hip_argv, vpninfo->csd_token);
 	strcat(hip_argv, " --client-os ");
 	strcat(hip_argv, gpst_os_name(vpninfo));
-	strcat(hip_argv, " --pan-gp-hip-exe ");
+	strcat(hip_argv, " --pan-gp-hip-exe \"");
 	strcat(hip_argv, vpninfo->onevpn_hip_exec);
+	strcat(hip_argv, "\"");
 
 	
 	vpn_progress(vpninfo, PRG_INFO,
 		     _("Calling HIP Script with '%s'.\n"), hip_argv);
 
+	HANDLE g_hChildStd_IN_Rd = NULL;
+	HANDLE g_hChildStd_IN_Wr = NULL;
 	HANDLE g_hChildStd_OUT_Rd = NULL;
 	HANDLE g_hChildStd_OUT_Wr = NULL;
    	SECURITY_ATTRIBUTES saAttr;
@@ -1006,6 +995,15 @@ static int run_hip_script(struct openconnect_info *vpninfo)
         return 1;
     }
 
+	if (! CreatePipe(&g_hChildStd_IN_Rd, &g_hChildStd_IN_Wr, &saAttr, 0)) {
+        vpn_progress(vpninfo, PRG_ERR,_("Failed Stdout SetHandleInformation\n"));
+        return 1;
+    }
+   if ( ! SetHandleInformation(g_hChildStd_IN_Wr, HANDLE_FLAG_INHERIT, 0) ){
+        vpn_progress(vpninfo, PRG_ERR,_("Failed Stdout SetHandleInformation\n"));
+        return 1;
+    }
+
 	STARTUPINFO si;
     PROCESS_INFORMATION pi;
 
@@ -1013,11 +1011,12 @@ static int run_hip_script(struct openconnect_info *vpninfo)
     si.cb = sizeof(STARTUPINFO);
     si.hStdError = g_hChildStd_OUT_Wr;
     si.hStdOutput = g_hChildStd_OUT_Wr;
+   	si.hStdInput = g_hChildStd_IN_Rd;
     si.dwFlags |= STARTF_USESTDHANDLES;
 
     ZeroMemory(&pi, sizeof(pi));
 	// Start the child process. 
-    if (!CreateProcess(vpninfo->csd_wrapper,   // Module name
+    if (!CreateProcess(NULL,   // Module name
         hip_argv,        	// Command line args
         NULL,           // Process handle not inheritable
         NULL,           // Thread handle not inheritable
@@ -1031,15 +1030,25 @@ static int run_hip_script(struct openconnect_info *vpninfo)
     {	
 		vpn_progress(vpninfo, PRG_ERR, _("CreateProcess failed \n"));
         return 1;
-    }
+    }else{
+      // Close handles to the child process and its primary thread.
+      // Some applications might keep these handles to monitor the status
+      // of the child process, for example. 
+
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+      
+      // Close handles to the stdin and stdout pipes no longer needed by the child process.
+      // If they are not explicitly closed, there is no way to recognize that the child process has ended.
+      
+      CloseHandle(g_hChildStd_OUT_Wr);
+      CloseHandle(g_hChildStd_IN_Rd);
+
+	}
 	
 	struct oc_text_buf *report_buf = buf_alloc();
+
 	WindowsReadFromPipe(report_buf, g_hChildStd_OUT_Rd);
-	
-	WaitForSingleObject(pi.hProcess,INFINITE);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    CloseHandle(g_hChildStd_OUT_Wr);
 
 	vpn_progress(vpninfo, PRG_INFO,
 				_("HIP script '%s' completed successfully (report is %d bytes).\n"),
